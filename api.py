@@ -5,6 +5,7 @@ from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from pdf2image import convert_from_path
 from PIL import Image
+import fitz  # PyMuPDF
 
 app = Flask(__name__)
 
@@ -18,17 +19,14 @@ def allowed_file(filename):
 
 @app.route('/extract_text', methods=['POST'])
 def extract_text():
-    # Check if file part is present
     if 'file' not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
-    
+
     file = request.files['file']
-    
-    # Check if file has a name
+
     if file.filename == '':
         return jsonify({"error": "No selected file"}), 400
-    
-    # Check for allowed file types
+
     if not allowed_file(file.filename):
         return jsonify({"error": "Unsupported file format"}), 400
 
@@ -38,22 +36,23 @@ def extract_text():
 
     text = ""
 
-    # -------------------------------
     # Handle PDF or Image
-    # -------------------------------
     if filename.lower().endswith(".pdf"):
-        # Convert PDF pages to images
-        images = convert_from_path(filepath)
-        for img in images:
-            text += pytesseract.image_to_string(img) + "\n"
+        try:
+            # Try PDF->image conversion
+            images = convert_from_path(filepath)
+            for img in images:
+                text += pytesseract.image_to_string(img) + "\n"
+        except:
+            # Fallback using PyMuPDF (for PDFs without images)
+            doc = fitz.open(filepath)
+            for page in doc:
+                text += page.get_text() + "\n"
     else:
-        # Handle image directly
         img = Image.open(filepath)
         text = pytesseract.image_to_string(img)
 
-    # -------------------------------
     # Extract Header Info
-    # -------------------------------
     date_match = re.search(r"Date[: ]+(\d{2}/\d{2}/\d{4})", text)
     due_date_match = re.search(r"Due Date[: ]+(\d{2}/\d{2}/\d{4})", text)
     bill_no_match = re.search(r"Bill no[: ]+(\d+)", text, re.IGNORECASE)
@@ -61,13 +60,10 @@ def extract_text():
     customer_match = re.search(r"Customer Name[: ]+([A-Za-z ]+)", text)
     name_match = re.search(r"Name[: ]+([A-Za-z ]+)", text)
 
-    # -------------------------------
     # Extract Item Table
-    # -------------------------------
     items = []
     lines = text.splitlines()
     start_extract = False
-
     for line in lines:
         line = line.strip()
         if re.search(r"Item\s+Quantity\s+Rate\s+amount", line, re.IGNORECASE):
@@ -87,9 +83,6 @@ def extract_text():
                     "Amount": amount
                 })
 
-    # -------------------------------
-    # Final JSON Response
-    # -------------------------------
     response = {
         "Date": date_match.group(1) if date_match else None,
         "Due Date": due_date_match.group(1) if due_date_match else None,
@@ -104,4 +97,4 @@ def extract_text():
     return jsonify(response)
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
