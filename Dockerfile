@@ -1,7 +1,7 @@
-# Dockerfile for Render deployment (installs tesseract + poppler + python deps)
+# Dockerfile for Render deployment (installs Tesseract + Poppler + Python deps)
 FROM python:3.11-slim
 
-# Install system packages required for OCR and pdf->image conversion
+# Install system packages required for OCR and PDF->image conversion
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     poppler-utils \
@@ -12,18 +12,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Create app dir
+# Set working directory
 WORKDIR /app
 
-# Copy and install python dependencies
+# Copy python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy app files
+# Install python dependencies
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
 COPY . .
 
-# Render provides a $PORT environment variable. Expose and use it.
+# Expose Render's PORT environment variable
 ENV PORT=10000
 
-# Start using gunicorn and bind to dynamic PORT
-CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:$PORT api:app"]
+# Use gunicorn to run the Flask app (ensure your Flask app file is named api.py and the app object is 'app')
+CMD ["sh", "-c", "gunicorn --workers 1 --bind 0.0.0.0:$PORT api:app"]
