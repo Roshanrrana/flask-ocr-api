@@ -1,4 +1,5 @@
-import re
+so i need to update my pu code with this below code
+"import re
 import os
 import pytesseract
 from flask import Flask, request, jsonify
@@ -16,8 +17,21 @@ ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg'}
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-@app.route('/extract_text', methods=['POST'])
+# -------------------------------
+# Root route for quick check
+# -------------------------------
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ Flask OCR API is running! Use POST /extract_text with a file."
+
+# -------------------------------
+# Extract Text Route
+# -------------------------------
+@app.route('/extract_text', methods=['GET', 'POST'])
 def extract_text():
+    if request.method == "GET":
+        return "Send a POST request with a file to extract text."
+
     if 'file' not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
     
@@ -34,22 +48,16 @@ def extract_text():
 
     text = ""
 
-    # -------------------------------
     # Handle PDF or Image
-    # -------------------------------
     if filename.lower().endswith(".pdf"):
-        # Convert PDF pages to images
         images = convert_from_path(filepath)
         for img in images:
             text += pytesseract.image_to_string(img) + "\n"
     else:
-        # Handle image directly
         img = Image.open(filepath)
         text = pytesseract.image_to_string(img)
 
-    # -------------------------------
     # Extract Header Info
-    # -------------------------------
     date_match = re.search(r"Date[: ]+(\d{2}/\d{2}/\d{4})", text)
     due_date_match = re.search(r"Due Date[: ]+(\d{2}/\d{2}/\d{4})", text)
     bill_no_match = re.search(r"Bill no[: ]+(\d+)", text, re.IGNORECASE)
@@ -58,9 +66,7 @@ def extract_text():
     customer_match = re.search(r"Customer Name[: ]+([A-Za-z ]+)", text)
     name_match = re.search(r"Name[: ]+([A-Za-z ]+)", text)
 
-    # -------------------------------
     # Extract Item Table
-    # -------------------------------
     items = []
     lines = text.splitlines()
     start_extract = False
@@ -83,9 +89,7 @@ def extract_text():
                     "Amount": amount
                 })
 
-    # -------------------------------
     # Final JSON Response
-    # -------------------------------
     response = {
         "Date": date_match.group(1) if date_match else None,
         "Due Date": due_date_match.group(1) if due_date_match else None,
@@ -101,3 +105,4 @@ def extract_text():
 
 if __name__ == "__main__":
     app.run(debug=True)
+"
