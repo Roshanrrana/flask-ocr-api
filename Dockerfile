@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libleptonica-dev \
     pkg-config \
     libgl1 \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
@@ -18,15 +18,18 @@ WORKDIR /app
 # Copy python dependencies
 COPY requirements.txt .
 
-# Install python dependencies
-RUN pip install --no-cache-dir --upgrade pip \
+# Upgrade pip and install python dependencies
+RUN python -m pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
 
+# Create uploads folder if not exists
+RUN mkdir -p uploads
+
 # Expose Render's PORT environment variable
 ENV PORT=10000
 
-# Use gunicorn to run the Flask app (ensure your Flask app file is named api.py and the app object is 'app')
+# Use gunicorn to run the Flask app
 CMD ["sh", "-c", "gunicorn --workers 1 --bind 0.0.0.0:$PORT api:app"]
