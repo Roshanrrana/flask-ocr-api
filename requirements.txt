@@ -2,3 +2,6 @@ flask
 pytesseract
 pillow
 pymupdf
+pdf2image
+pdfplumber
+gunicorn
