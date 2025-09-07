@@ -16,108 +16,103 @@ ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg'}
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def extract_text_from_file(filepath):
+def extract_text_from_pdf(pdf_path):
+    images = convert_from_path(pdf_path)
     text = ""
-    if filepath.endswith(".pdf"):
-        images = convert_from_path(filepath)
-        for img in images:
-            text += pytesseract.image_to_string(img)
-    else:
-        img = Image.open(filepath)
-        text = pytesseract.image_to_string(img)
+    for img in images:
+        text += pytesseract.image_to_string(img)
     return text
 
-def parse_data(text):
-    data = {
+def parse_text_to_json(text):
+    structured_data = {
         "vendor_info": {
-            "aliases": ["Name", "Vendor Name", "Customer Name"],
-            "name": None
+            "name": None,
+            "aliases": ["Name", "Vendor Name", "Customer Name"]
         },
         "bill_info": {
-            "aliases": ["Bill Number", "Bill", "Reference number"],
-            "bill_number": None
+            "bill_number": None,
+            "aliases": ["Bill Number", "Bill", "Reference number"]
         },
         "dates": {
+            "created_date": None,
+            "due_date": None,
             "aliases": {
                 "created_date": ["Date", "Created Date"],
                 "due_date": ["Due Date", "Last Date"]
-            },
-            "created_date": None,
-            "due_date": None
+            }
         },
-        "items": [],
-        "expenses": [],
-        "raw_text": text
+        "items": []
     }
 
-    # Extract vendor name
-    vendor_match = re.search(r"Name[:\- ]+([A-Za-z ]+)", text, re.IGNORECASE)
+    # --- Vendor name ---
+    vendor_match = re.search(r"Name:\s*(.+)", text, re.IGNORECASE)
     if vendor_match:
-        data["vendor_info"]["name"] = vendor_match.group(1).strip()
+        structured_data["vendor_info"]["name"] = vendor_match.group(1).strip()
 
-    # Extract bill number
-    bill_match = re.search(r"Bill\s*(?:No|Number)?[:\- ]+(\w+)", text, re.IGNORECASE)
+    # --- Bill number ---
+    bill_match = re.search(r"Bill\s*no\s*(\d+)", text, re.IGNORECASE)
     if bill_match:
-        data["bill_info"]["bill_number"] = bill_match.group(1).strip()
+        structured_data["bill_info"]["bill_number"] = bill_match.group(1).strip()
 
-    # Extract dates (MM/DD/YYYY or DD/MM/YYYY)
-    created_date_match = re.search(r"Date[:\- ]+(\d{2}[\/\-]\d{2}[\/\-]\d{4})", text, re.IGNORECASE)
-    if created_date_match:
-        data["dates"]["created_date"] = created_date_match.group(1).strip()
+    # --- Dates ---
+    due_date_match = re.search(r"Due Date\s*([0-9/]+)", text, re.IGNORECASE)
+    created_date_match = re.search(r"Date\s*([0-9/]+)", text, re.IGNORECASE)
 
-    due_date_match = re.search(r"Due\s*Date[:\- ]+(\d{2}[\/\-]\d{2}[\/\-]\d{4})", text, re.IGNORECASE)
     if due_date_match:
-        data["dates"]["due_date"] = due_date_match.group(1).strip()
+        structured_data["dates"]["due_date"] = due_date_match.group(1).strip()
+    if created_date_match:
+        structured_data["dates"]["created_date"] = created_date_match.group(1).strip()
 
-    # Extract items (Item Name, Quantity, Rate, Amount)
-    item_pattern = re.findall(r"([A-Za-z ]+)\s+(\d+)\s+(\d+)\s+(\d+)", text)
-    for item in item_pattern:
-        data["items"].append({
-            "item_name": item[0].strip(),
-            "description": None,
-            "rate": item[2],
-            "amount": item[3],
-            "aliases": {
-                "item_name": ["Item", "Item Name"],
-                "description": ["Item Description", "Description"],
-                "rate": ["Item Rate", "Rate", "Price"],
-                "amount": ["Total Amount", "Amount"]
-            }
-        })
+    # --- Items (table detection) ---
+    lines = text.splitlines()
+    item_section = False
+    for line in lines:
+        if re.search(r"Item\s+Quantity\s+Rate\s+amount", line, re.IGNORECASE):
+            item_section = True
+            continue
+        if item_section and line.strip():
+            parts = line.split()
+            if len(parts) >= 4:
+                item_name = " ".join(parts[:-3])
+                qty = parts[-3]
+                rate = parts[-2]
+                amount = parts[-1]
+                structured_data["items"].append({
+                    "item_name": item_name,
+                    "description": None,
+                    "item_qunatity": int(qty) if qty.isdigit() else qty,
+                    "rate": float(rate) if rate.replace('.', '').isdigit() else rate,
+                    "amount": float(amount) if amount.replace('.', '').isdigit() else amount,
+                    "aliases": {
+                        "item_name": ["Item", "Item Name"],
+                        "description": ["Item Description", "Description"],
+                        "rate": ["Item Rate", "Rate", "Price"],
+                        "amount": ["Total Amount", "Amount"]
+                    }
+                })
 
-    # Extract expenses (Account + Amount) → Dummy example
-    expense_match = re.findall(r"Account[:\- ]+(\w+)\s+Amount[:\- ]+(\d+)", text, re.IGNORECASE)
-    for exp in expense_match:
-        data["expenses"].append({
-            "account": exp[0],
-            "amount": exp[1],
-            "aliases": {
-                "account": ["Account"],
-                "amount": ["Amount"]
-            }
-        })
+    return {
+        "raw_text": text,
+        "structured_data": structured_data
+    }
 
-    return data
-
-
-@app.route("/extract_text", methods=["POST"])
+@app.route('/extract_text', methods=['POST'])
 def extract_text():
     if 'file' not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
-
+        return jsonify({"error": "No file part"}), 400
     file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
     if file and allowed_file(file.filename):
         filename = secure_filename(file.filename)
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
-        file.save(filepath)
+        file_path = os.path.join(UPLOAD_FOLDER, filename)
+        file.save(file_path)
 
-        extracted_text = extract_text_from_file(filepath)
-        parsed_json = parse_data(extracted_text)
+        text = extract_text_from_pdf(file_path)
+        result = parse_text_to_json(text)
 
-        return jsonify(parsed_json)
+        return jsonify(result)
+    return jsonify({"error": "Invalid file format"}), 400
 
-    return jsonify({"error": "Invalid file type"}), 400
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+if __name__ == '__main__':
+    app.run(debug=True)
