@@ -1,5 +1,5 @@
-import os
 import re
+import os
 import pytesseract
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
@@ -16,103 +16,105 @@ ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg'}
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def extract_text_from_pdf(pdf_path):
-    images = convert_from_path(pdf_path)
-    text = ""
-    for img in images:
-        text += pytesseract.image_to_string(img)
-    return text
+def extract_text_from_file(filepath):
+    if filepath.lower().endswith(".pdf"):
+        images = convert_from_path(filepath)
+        text = ""
+        for img in images:
+            text += pytesseract.image_to_string(img)
+        return text
+    else:
+        return pytesseract.image_to_string(Image.open(filepath))
 
-def parse_text_to_json(text):
+def parse_invoice_text(text):
     structured_data = {
-        "vendor_info": {
-            "name": None,
-            "aliases": ["Name", "Vendor Name", "Customer Name"]
-        },
         "bill_info": {
-            "bill_number": None,
-            "aliases": ["Bill Number", "Bill", "Reference number"]
+            "aliases": ["Bill Number", "Bill", "Reference number"],
+            "bill_number": None
         },
         "dates": {
-            "created_date": None,
-            "due_date": None,
             "aliases": {
                 "created_date": ["Date", "Created Date"],
                 "due_date": ["Due Date", "Last Date"]
-            }
+            },
+            "created_date": None,
+            "due_date": None
         },
-        "items": []
+        "items": [],
+        "vendor_info": {
+            "aliases": ["Name", "Vendor Name", "Customer Name"],
+            "name": None
+        }
     }
 
-    # --- Vendor name ---
-    vendor_match = re.search(r"Name:\s*(.+)", text, re.IGNORECASE)
-    if vendor_match:
-        structured_data["vendor_info"]["name"] = vendor_match.group(1).strip()
+    # ✅ Extract vendor/customer name
+    name_match = re.search(r"(?:Name|Customer Name|Vendor Name)[:\s]+([A-Za-z ]+)", text, re.IGNORECASE)
+    if name_match:
+        structured_data["vendor_info"]["name"] = name_match.group(1).strip()
 
-    # --- Bill number ---
-    bill_match = re.search(r"Bill\s*no\s*(\d+)", text, re.IGNORECASE)
+    # ✅ Extract Bill number
+    bill_match = re.search(r"(?:Bill\s*No|Bill\s*Number|Invoice\s*No)[:\s]+(\d+)", text, re.IGNORECASE)
     if bill_match:
         structured_data["bill_info"]["bill_number"] = bill_match.group(1).strip()
 
-    # --- Dates ---
-    due_date_match = re.search(r"Due Date\s*([0-9/]+)", text, re.IGNORECASE)
-    created_date_match = re.search(r"Date\s*([0-9/]+)", text, re.IGNORECASE)
+    # ✅ Extract Dates (Created + Due Date)
+    created_match = re.search(r"(?:Created\s*Date|Date)[:\s]+(\d{2}[/-]\d{2}[/-]\d{4})", text, re.IGNORECASE)
+    if created_match:
+        structured_data["dates"]["created_date"] = created_match.group(1).strip()
 
-    if due_date_match:
-        structured_data["dates"]["due_date"] = due_date_match.group(1).strip()
-    if created_date_match:
-        structured_data["dates"]["created_date"] = created_date_match.group(1).strip()
+    due_match = re.search(r"(?:Due\s*Date|Last\s*Date)[:\s]+(\d{2}[/-]\d{2}[/-]\d{4})", text, re.IGNORECASE)
+    if due_match:
+        structured_data["dates"]["due_date"] = due_match.group(1).strip()
 
-    # --- Items (table detection) ---
-    lines = text.splitlines()
-    item_section = False
+    # ✅ Extract Items (flexible table parser)
+    # Looks for: Item | Qty | Quantity | Rate | Amount | Price
+    lines = text.split("\n")
     for line in lines:
-        if re.search(r"Item\s+Quantity\s+Rate\s+amount", line, re.IGNORECASE):
-            item_section = True
-            continue
-        if item_section and line.strip():
-            parts = line.split()
-            if len(parts) >= 4:
-                item_name = " ".join(parts[:-3])
-                qty = parts[-3]
-                rate = parts[-2]
-                amount = parts[-1]
-                structured_data["items"].append({
-                    "item_name": item_name,
-                    "description": None,
-                    "item_qunatity": int(qty) if qty.isdigit() else qty,
-                    "rate": float(rate) if rate.replace('.', '').isdigit() else rate,
-                    "amount": float(amount) if amount.replace('.', '').isdigit() else amount,
-                    "aliases": {
-                        "item_name": ["Item", "Item Name"],
-                        "description": ["Item Description", "Description"],
-                        "rate": ["Item Rate", "Rate", "Price"],
-                        "amount": ["Total Amount", "Amount"]
-                    }
-                })
+        if re.search(r"\b(Item|Product)\b", line, re.IGNORECASE):
+            continue  # skip header line
+        parts = re.split(r"\s{2,}|\t", line.strip())
+        if len(parts) >= 3:
+            try:
+                item_name = parts[0]
+                qty = int(re.findall(r"\d+", parts[1])[0]) if len(parts) > 1 and re.search(r"\d+", parts[1]) else None
+                rate = int(re.findall(r"\d+", parts[2])[0]) if len(parts) > 2 and re.search(r"\d+", parts[2]) else None
+                amount = int(re.findall(r"\d+", parts[-1])[0]) if re.search(r"\d+", parts[-1]) else None
 
-    return {
-        "raw_text": text,
-        "structured_data": structured_data
-    }
+                structured_data["items"].append({
+                    "aliases": {
+                        "item_name": ["Item", "Product", "Item Name"],
+                        "description": ["Item Description", "Description"],
+                        "rate": ["Rate", "Price"],
+                        "amount": ["Amount", "Total Amount"]
+                    },
+                    "item_name": item_name,
+                    "item_quantity": qty,
+                    "rate": rate,
+                    "amount": amount,
+                    "description": None
+                })
+            except:
+                continue
+
+    return {"raw_text": text, "structured_data": structured_data}
 
 @app.route('/extract_text', methods=['POST'])
-def extract_text():
+def extract_text_api():
     if 'file' not in request.files:
-        return jsonify({"error": "No file part"}), 400
+        return jsonify({"error": "No file uploaded"}), 400
+
     file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "No selected file"}), 400
     if file and allowed_file(file.filename):
         filename = secure_filename(file.filename)
-        file_path = os.path.join(UPLOAD_FOLDER, filename)
-        file.save(file_path)
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        file.save(filepath)
 
-        text = extract_text_from_pdf(file_path)
-        result = parse_text_to_json(text)
+        text = extract_text_from_file(filepath)
+        structured_data = parse_invoice_text(text)
 
-        return jsonify(result)
-    return jsonify({"error": "Invalid file format"}), 400
+        return jsonify(structured_data)
+
+    return jsonify({"error": "Invalid file type"}), 400
 
 if __name__ == '__main__':
     app.run(debug=True)
