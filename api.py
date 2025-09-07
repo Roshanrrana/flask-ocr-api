@@ -1,100 +1,136 @@
-import re
 import os
+import re
 import pytesseract
+import fitz  # PyMuPDF
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from pdf2image import convert_from_path
 from PIL import Image
-import fitz  # PyMuPDF
 
 app = Flask(__name__)
 
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg'}
+ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
+
 
 def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
-@app.route('/extract_text', methods=['POST'])
+
+@app.route("/extract_text", methods=["POST"])
 def extract_text():
-    if 'file' not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+    try:
+        if "file" not in request.files:
+            return jsonify({"error": "No file part"}), 400
 
-    file = request.files['file']
+        file = request.files["file"]
 
-    if file.filename == '':
-        return jsonify({"error": "No selected file"}), 400
+        if file.filename == "":
+            return jsonify({"error": "No selected file"}), 400
 
-    if not allowed_file(file.filename):
-        return jsonify({"error": "Unsupported file format"}), 400
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(UPLOAD_FOLDER, filename)
+            file.save(filepath)
 
-    filename = secure_filename(file.filename)
-    filepath = os.path.join(UPLOAD_FOLDER, filename)
-    file.save(filepath)
+            if os.path.getsize(filepath) == 0:
+                return jsonify({"error": "Uploaded file is empty"}), 400
 
-    text = ""
+            extracted_text = ""
 
-    # Handle PDF or Image
-    if filename.lower().endswith(".pdf"):
-        try:
-            # Try PDF->image conversion
-            images = convert_from_path(filepath)
-            for img in images:
-                text += pytesseract.image_to_string(img) + "\n"
-        except:
-            # Fallback using PyMuPDF (for PDFs without images)
-            doc = fitz.open(filepath)
-            for page in doc:
-                text += page.get_text() + "\n"
-    else:
-        img = Image.open(filepath)
-        text = pytesseract.image_to_string(img)
+            # 1️⃣ Try with PyMuPDF
+            try:
+                doc = fitz.open(filepath)
+                for page in doc:
+                    extracted_text += page.get_text()
+                doc.close()
+            except Exception as e:
+                print("PyMuPDF failed:", e)
 
-    # Extract Header Info
-    date_match = re.search(r"Date[: ]+(\d{2}/\d{2}/\d{4})", text)
-    due_date_match = re.search(r"Due Date[: ]+(\d{2}/\d{2}/\d{4})", text)
-    bill_no_match = re.search(r"Bill no[: ]+(\d+)", text, re.IGNORECASE)
-    vendor_match = re.search(r"Vendor Name[: ]+([A-Za-z ]+)", text)
-    customer_match = re.search(r"Customer Name[: ]+([A-Za-z ]+)", text)
-    name_match = re.search(r"Name[: ]+([A-Za-z ]+)", text)
+            # 2️⃣ If still empty, try pdf2image + OCR
+            if not extracted_text.strip():
+                try:
+                    images = convert_from_path(filepath)
+                    for img in images:
+                        extracted_text += pytesseract.image_to_string(img)
+                except Exception as e:
+                    print("pdf2image failed:", e)
 
-    # Extract Item Table
-    items = []
-    lines = text.splitlines()
-    start_extract = False
-    for line in lines:
-        line = line.strip()
-        if re.search(r"Item\s+Quantity\s+Rate\s+amount", line, re.IGNORECASE):
-            start_extract = True
-            continue
-        if start_extract and line:
-            parts = line.split()
-            if len(parts) >= 4:
-                item_name = " ".join(parts[:-3])
-                qty = parts[-3]
-                rate = parts[-2]
-                amount = parts[-1]
-                items.append({
-                    "Item Name": item_name,
-                    "Quantity": qty,
-                    "Rate": rate,
-                    "Amount": amount
-                })
+            # 3️⃣ If still empty, try direct image OCR
+            if not extracted_text.strip() and filename.lower().endswith(("png", "jpg", "jpeg")):
+                try:
+                    image = Image.open(filepath)
+                    extracted_text = pytesseract.image_to_string(image)
+                except Exception as e:
+                    print("Image OCR failed:", e)
 
-    response = {
-        "Date": date_match.group(1) if date_match else None,
-        "Due Date": due_date_match.group(1) if due_date_match else None,
-        "Reference No/Bill No": bill_no_match.group(1) if bill_no_match else None,
-        "Vendor Name": vendor_match.group(1) if vendor_match else None,
-        "Customer Name": customer_match.group(1) if customer_match else None,
-        "Name": name_match.group(1) if name_match else None,
-        "Items": items,
-        "Raw Extracted Text": text
-    }
+            # 4️⃣ If still empty → return error
+            if not extracted_text.strip():
+                return jsonify({
+                    "error": "Unable to extract text",
+                    "raw": "File may be corrupted or unsupported"
+                }), 500
 
-    return jsonify(response)
+            # ✅ Clean extracted text
+            cleaned_text = re.sub(r"\s+", " ", extracted_text).strip()
+
+            # 🔹 Return structured JSON (template)
+            response_json = {
+                "vendor_info": {
+                    "name": None,
+                    "aliases": ["Name", "Vendor Name", "Customer Name"]
+                },
+                "bill_info": {
+                    "bill_number": None,
+                    "aliases": ["Bill Number", "Bill", "Reference number"]
+                },
+                "dates": {
+                    "created_date": None,
+                    "due_date": None,
+                    "aliases": {
+                        "created_date": ["Date", "Created Date"],
+                        "due_date": ["Due Date", "Last Date"]
+                    }
+                },
+                "items": [
+                    {
+                        "item_name": None,
+                        "description": None,
+                        "rate": None,
+                        "amount": None,
+                        "aliases": {
+                            "item_name": ["Item", "Item Name"],
+                            "description": ["Item Description", "Description"],
+                            "rate": ["Item Rate", "Rate", "Price"],
+                            "amount": ["Total Amount", "Amount"]
+                        }
+                    }
+                ],
+                "expenses": [
+                    {
+                        "account": None,
+                        "amount": None,
+                        "aliases": {
+                            "account": ["Account"],
+                            "amount": ["Amount"]
+                        }
+                    }
+                ],
+                "raw_text": cleaned_text  # Keep original extracted text for debugging
+            }
+
+            return jsonify(response_json)
+
+        return jsonify({"error": "File type not allowed"}), 400
+
+    except Exception as e:
+        return jsonify({
+            "error": "OCR API error: Invalid response from OCR API",
+            "raw": str(e)
+        }), 500
+
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    app.run(host="0.0.0.0", port=10000)
